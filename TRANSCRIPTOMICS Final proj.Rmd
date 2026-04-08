@@ -1,0 +1,453 @@
+---
+title: "Transcriptomics Final Proj"
+author: "Deepthi Dineshkumar"
+date: "2026-04-03"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r cars}
+summary(cars)
+```
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+plot(pressure)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+
+
+```{r}
+# To load the packages needed
+library(readxl)
+library(openxlsx)
+library(tidyverse)
+library(scCustomize)
+library(edgeR)
+library(scDblFinder)
+library(Seurat)
+library(CellChat)
+```
+```{r}
+# To download the dataset- BARCODE
+download.file(
+  url = "https://ftp.ncbi.nlm.nih.gov/geo/samples/GSM6190nnn/GSM6190913/suppl/GSM6190913_b1_barcodes.tsv.gz",
+  destfile = "/scratch/dineshkumar.de/b1/barcodes.tsv.gz",
+  mode = "wb"
+)
+
+# To download the FEATURES dataset
+download.file(
+  url = "https://ftp.ncbi.nlm.nih.gov/geo/samples/GSM6190nnn/GSM6190913/suppl/GSM6190913_b1_features.tsv.gz",
+  destfile = "/scratch/dineshkumar.de/b1/features.tsv.gz",
+  mode = "wb"
+)
+
+# To download the MATRIX dataset
+download.file(
+  url = "https://ftp.ncbi.nlm.nih.gov/geo/samples/GSM6190nnn/GSM6190913/suppl/GSM6190913_b1_matrix.mtx.gz",
+  destfile = "/scratch/dineshkumar.de/b1/matrix.mtx.gz",
+  mode = "wb"
+)
+```
+```{r}
+# After creating the matrix
+#Separate gene expression and HTO data
+dataset_rna_counts <- b1$'Gene Expression'
+dataset_barcodes <- b1$'Antibody Capture'
+
+```
+```{r}
+# Create Seurat object with basic filtering
+# Create Seurat object
+# min.cells = 5: keep genes detected in at least 5 cells
+# min.features = 200: keep cells with at least 200 genes detected
+dataset <- CreateSeuratObject(
+  counts = dataset_rna_counts,
+  min.cells = 5,
+  min.features = 200
+)
+```
+```{r}
+# Get joint barcodes between RNA and HTO
+# Extract RNA counts as a layer
+dataset_rna_counts2 <- LayerData(dataset, layer = "counts")
+
+# Find cells present in BOTH the RNA and HTO data
+# This ensures we only keep cells that have both gene expression AND barcode data
+dataset_joint.barcodes <- intersect(
+  colnames(dataset_rna_counts2),
+  colnames(dataset_barcodes)
+)
+```
+```{r}
+# Subset both matrices to only joint barcodes
+# Keep only the cells present in both assays
+dataset_rna_counts2 <- dataset_rna_counts2[, dataset_joint.barcodes]
+dataset_barcodes2 <- as.matrix(dataset_barcodes[, dataset_joint.barcodes])
+```
+```{r}
+# COnfirm HTO barcode names
+# Check the 17 barcode names
+rownames(dataset_barcodes2)
+```
+
+```{r}
+# Add HTO as the new assay to the Seurat object
+# Create a new assay from the barcode data
+dataset_barcode_assay <- CreateAssayObject(counts = dataset_barcodes2)
+# Add it to the Seurat object
+dataset[["barcodes"]] <- dataset_barcode_assay
+```
+
+```{r}
+# Validate multiple assays exist
+DefaultAssay(dataset)
+Assays(dataset)
+```
+
+```{r}
+# Normalize and demuliplex
+# Normalize the barcode data first
+dataset <- NormalizeData(
+  dataset,
+  assay = "barcodes",
+  normalization.method = "CLR"  # CLR normalization for HTO data
+)
+
+# Demultiplex — assigns each cell to a sample based on HTO signal
+dataset <- HTODemux(
+  dataset,
+  assay = "barcodes",
+  positive.quantile = 0.99
+)
+```
+
+```{r}
+# Remove unclassified Negative cells
+# Group cells by classification
+Idents(dataset) <- "barcodes_classification.global"
+
+# Check how many cells in each category
+table(Idents(dataset))
+# Shows: Doublet, Negative, Singlet counts
+
+# Remove Negative cells (cells with no barcode signal)
+dataset <- subset(dataset, idents = "Negative", invert = TRUE)
+
+# Verify removal
+table(Idents(dataset))
+```
+
+```{r}
+# Group by maximum HTO signal
+Idents(dataset) <- "barcodes_maxID"
+table(Idents(dataset))
+```
+```{r}
+# violin plot
+VlnPlot(
+  dataset,
+  features = "nFeature_RNA",
+  pt.size = 0.1,
+  log = TRUE
+)
+```
+```{r}
+# Rename barcodes to time/space labels
+# Set identity to barcode maxID
+Idents(dataset) <- "barcodes_maxID"
+
+# Check current barcode names
+levels(dataset)
+
+# Rename each barcode to its biological meaning
+# D = Day post-wounding, mm = distance from wound
+dataset <- RenameIdents(dataset,
+  "Barcode-1"  = "D01_2mm",
+  "Barcode-2"  = "D01_4mm",
+  "Barcode-3"  = "D01_6mm",
+  "Barcode-4"  = "D01_8mm",
+  "Barcode-5"  = "D03_2mm",
+  "Barcode-6"  = "D03_4mm",
+  "Barcode-7"  = "D03_6mm",
+  "Barcode-8"  = "D03_8mm",
+  "Barcode-9"  = "D07_2mm",
+  "Barcode-10" = "D07_4mm",
+  "Barcode-11" = "D07_6mm",
+  "Barcode-12" = "D07_8mm",
+  "Barcode-13" = "D14_2mm",
+  "Barcode-14" = "D14_4mm",
+  "Barcode-15" = "D14_6mm",
+  "Barcode-16" = "D14_8mm",
+  "Barcode-17" = "UW"        # UW = Unwounded control
+)
+```
+
+```{r}
+#save as new metadata column called time_space
+dataset[["time_space"]] <- Idents(dataset)
+```
+```{r}
+#filtering out genes and the cells with min criteria
+dataset <- CreateSeuratObject(counts =
+b1, min.cells = 5, min.features = 200)
+```
+```{r}
+#switching to RNA assay
+DefaultAssay(dataset) <- "RNA"
+Idents(dataset) <- "time_space"
+```
+```{r}
+# To calculate mitochondrial percentage
+# mt- prefix is for mouse mitochondrial genes (capital MT- would be human)
+dataset[["percent.mt"]] <- PercentageFeatureSet(dataset, pattern = "^mt-")
+```
+```{r}
+# To visualize the QC metrics before filtering
+plot1 <- FeatureScatter(dataset, 
+                        feature1 = "nCount_RNA", 
+                        feature2 = "percent.mt")
+
+plot2 <- FeatureScatter(dataset, 
+                        feature1 = "nFeature_RNA", 
+                        feature2 = "percent.mt")
+
+plot1 + plot2
+```
+
+```{r}
+# Remove low quality cells
+dataset <- subset(dataset, 
+                  subset = nFeature_RNA > 200 & percent.mt < 25)
+
+print(dataset)
+```
+
+```{r}
+#to visualize the QC metrics after filtering
+plot1 <- FeatureScatter(dataset, 
+                        feature1 = "nCount_RNA", 
+                        feature2 = "percent.mt")
+
+plot2 <- FeatureScatter(dataset, 
+                        feature1 = "nFeature_RNA", 
+                        feature2 = "percent.mt")
+
+plot1 + plot2
+```
+
+```{r}
+# Run scDblFinder to detect doublets
+library(scDblFinder)
+
+DefaultAssay(dataset) <- "RNA"
+
+# Run doublet detection
+# samples = Idents(dataset) tells scDblFinder to 
+# treat each time_space group as a separate sample
+sce <- scDblFinder(
+  GetAssayData(dataset, assay = "RNA", layer = "counts"),
+  samples = Idents(dataset)
+)
+
+# Check output
+sce
+```
+
+```{r}
+# adding the doublet score to the metadata
+dataset$scDblFinder.score <- sce$scDblFinder.score
+```
+
+```{r}
+# to visualize the doublet score distribution
+VlnPlot(dataset, 
+        features = "scDblFinder.score", 
+        raster = FALSE, 
+        pt.size = 0.5)
+```
+
+```{r}
+# remove likely doublets
+# Keep only cells with doublet score below 0.25
+dataset <- subset(dataset, scDblFinder.score < 0.25)
+```
+
+```{r}
+# Save the dataset
+saveRDS(dataset, "dataset_post_Method2.rds")
+```
+
+```{r}
+# Analyzing the dataset
+#reloading the data
+dataset <- readRDS("dataset_post_Method2.rds")
+dataset <- NormalizeData(object = dataset)
+dataset <- FindVariableFeatures(object = dataset)
+dataset <- ScaleData(object = dataset)
+dataset <- RunPCA(object = dataset)
+```
+```{r}
+#Visualizing the PCA dimensions using Elbow plots
+ElbowPlot(dataset, reduction = "pca",
+ndims = 50)
+```
+
+```{r}
+#Cell Clustering
+dataset <- FindNeighbors(dataset, verbose = TRUE, dims = 1:13)
+dataset <- FindClusters(dataset, verbose = TRUE, resolution = 0.1)
+```
+```{r}
+#UMAP dimenstional reduction
+dataset <- RunUMAP(dataset, verbose = TRUE, dims = 1:13, seed.use = 123)
+```
+```{r}
+#UMAP Plot
+DimPlot(dataset, group.by = "seurat_clusters", raster = FALSE, label = TRUE)
+```
+```{r}
+#Clustering based on the time/space annotation
+DimPlot(dataset, group.by = "time_space",
+raster = FALSE, label = FALSE)
+```
+```{r}
+# Generating table of cell cluster association with the wound time/space annotation
+table(dataset$time_space, dataset$seurat_clusters)
+```
+```{r}
+# Identifying the DEGs
+Idents(dataset) <- "seurat_clusters"
+Cell_markers <- FindAllMarkers(dataset, max.cells.per.ident = 500, only.pos = TRUE, min.pct = 0.10, logfc.threshold = 0.25)
+
+write.csv(Cell_markers, file = file.path(getwd(), "dataset_cluster_markers.txt"))
+```
+
+```{r}
+# Identifying and Enrichment analysis
+Idents(dataset) <- "seurat_clusters"
+dataset[["cell_types"]] <- Idents(dataset)
+Idents(dataset) <- "cell_types"
+dataset <- RenameIdents(dataset,
+"0" = "Macrophage",
+"1" = "Neutrophil",
+"2" = "Fibroblast",
+"3" = "Epithelial cell",
+"4" = "Endothelial cell",
+"5" = "T cell",
+"6" = "Fibroblast",
+"7" = "Smooth muscle cell"
+)
+levels(dataset)
+dataset[["cell_types"]] <- Idents(dataset)
+```
+```{r}
+#UMAP plot for visualizing after labeling
+DimPlot(dataset, group.by = "cell_types",
+raster = FALSE, label = FALSE)
+```
+
+```{r}
+# Visualizing top cluster marker genes
+DefaultAssay(dataset) <- "RNA"
+FeaturePlot(dataset, features =
+c("Arg1", "Retnlg", "Fgf7", "Dsp",
+"Tie1", "Cd3g", "Cdh4", "Rgs5"),
+raster=FALSE, ncol = 4)
+```
+```{r}
+# Dot plot for the top DEGs from original cluster numbers
+DotPlot(dataset,group.by=
+"seurat_clusters", features =
+c("Arg1","Retnlg","Fgf7","Dsp","Tie1",
+"Cd3g","Cdh4","Rgs5")) + RotatedAxis() +
+scale_colour_gradient2(low = "blue", mid
+= "grey", high = "red")
+```
+```{r}
+#Dot plot for the top DEGs from annotated cell type
+DotPlot(dataset, group.by
+= "cell_types", features =
+c("Arg1","Retnlg","Fgf7","Dsp","Tie1",
+"Cd3g","Cdh4","Rgs5")) + RotatedAxis() +
+scale_colour_gradient2(low = "blue", mid
+= "grey", high = "red")
+```
+```{r}
+# Time-series analysis
+Idents(dataset) <- "time_space"
+dataset[["DPW"]] <- Idents(dataset)
+Idents(dataset) <- "DPW"
+new.cluster.ids <- c("D1", "D1", "D1",
+"D1", "D3", "D3", "D3", "D3", "D7",
+"D7", "D7", "D7", "D14", "D14", "D14",
+"D14", "UW")
+names(new.cluster.ids) <- levels(dataset)
+dataset <- RenameIdents(dataset,
+new.cluster.ids)
+dataset[["DPW"]] <- Idents(dataset)
+Idents(dataset) <- "DPW"
+```
+```{r}
+#UMAP plot for new time-course grouping
+DimPlot(dataset, group.by = "DPW", raster
+= FALSE, label = FALSE)
+```
+```{r}
+# To generate table
+table(dataset$DPW, dataset$cell_types)
+Idents(dataset) <- "DPW"
+Cell_DPW_markers <- FindAllMarkers(dataset,
+max.cells.per.ident = 500,
+only.pos = TRUE, min.pct = 0.10,
+logfc.threshold = 0.25)
+write.csv(Cell_DPW_markers, file = file.path(getwd(), "dataset_DPW_markers.txt"))
+```
+
+```{r}
+# Relative change of cell type through the time course of healing
+pt1 <- table(dataset$DPW, dataset
+$cell_types)
+pt1 <- as.data.frame(pt1)
+pt1$Var1 <- as.character(pt1$Var1)
+ggplot(pt1, aes(x = Var2, y = Freq, fill = Var1)) +
+  theme_bw(base_size = 15) +
+geom_col(position = "fill", width = 0.5) +
+  xlab("Sample") + RotatedAxis() +
+  ylab("Proportion") +
+  theme(legend.title = element_blank())
+```
+
+```{r}
+#Visualize the proportion of cell types in each DPW
+pt2 <- table(dataset$cell_types, dataset
+$DPW)
+pt2 <- as.data.frame(pt2)
+pt2$Var1 <- as.character(pt2$Var1)
+ggplot(pt2, aes(x = Var2, y = Freq, fill
+= Var1)) +
+theme_bw(base_size = 15) +
+geom_col(position = "fill", width = 0.5)+
+xlab("Sample") +
+ylab("Proportion") +
+theme(legend.title = element_blank())
+```
+```{r}
+#saving the dataset
+saveRDS(dataset, "dataset_post_Method3.rds")
+```
+
