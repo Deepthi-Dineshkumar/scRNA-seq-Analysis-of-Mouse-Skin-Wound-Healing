@@ -218,6 +218,7 @@ dataset[["percent.mt"]] <- PercentageFeatureSet(dataset, pattern = "^mt-")
 ```
 ```{r}
 # To visualize the QC metrics before filtering
+
 plot1 <- FeatureScatter(dataset, 
                         feature1 = "nCount_RNA", 
                         feature2 = "percent.mt")
@@ -231,6 +232,7 @@ plot1 + plot2
 
 ```{r}
 # Remove low quality cells
+
 dataset <- subset(dataset, 
                   subset = nFeature_RNA > 200 & percent.mt < 25)
 
@@ -293,6 +295,8 @@ saveRDS(dataset, "dataset_post_Method2.rds")
 ```
 
 ```{r}
+## step3: Seurat Clustering and Cell Type Annotation
+
 # Analyzing the dataset
 #reloading the data
 dataset <- readRDS("dataset_post_Method2.rds")
@@ -451,3 +455,632 @@ theme(legend.title = element_blank())
 saveRDS(dataset, "dataset_post_Method3.rds")
 ```
 
+## Step 4: Fibroblast Subtype Analysis
+```{r subset-fibroblasts}
+dataset <- readRDS("dataset_post_Method3.rds")
+
+# Subset only fibroblasts
+Idents(dataset) <- "cell_types"
+dataset_fibroblast <- subset(dataset, idents = "Fibroblast")
+
+# Check how many fibroblasts we have
+ncol(dataset_fibroblast)
+```
+
+
+```{r fibroblast-pca}
+dataset_fibroblast <- RunPCA(dataset_fibroblast, verbose = TRUE)
+
+# Check elbow plot - paper uses 9 PCs for fibroblasts
+ElbowPlot(dataset_fibroblast, reduction = "pca", ndims = 50)
+```
+
+```{r fibroblast-clustering}
+# Cluster using 9 PCs
+dataset_fibroblast <- FindNeighbors(dataset_fibroblast, dims = 1:9)
+dataset_fibroblast <- FindClusters(dataset_fibroblast, resolution = 0.1)
+
+# Run UMAP
+dataset_fibroblast <- RunUMAP(dataset_fibroblast, 
+                               dims = 1:9, 
+                               seed.use = 123)
+
+# Visualize
+DimPlot(dataset_fibroblast, group.by = "seurat_clusters", 
+        label = TRUE, raster = FALSE)
+```
+
+```{r fibroblast-markers}
+Idents(dataset_fibroblast) <- "seurat_clusters"
+
+fibroblast_markers <- FindAllMarkers(dataset_fibroblast,
+  max.cells.per.ident = 500,
+  only.pos = TRUE,
+  min.pct = 0.10,
+  logfc.threshold = 0.25)
+
+# Save to file
+write.csv(fibroblast_markers, "fibroblast_cluster_markers.csv")
+
+# View top 3 markers per cluster
+fibroblast_markers %>%
+  group_by(cluster) %>%
+  top_n(n = 3, wt = avg_log2FC) %>%
+  select(cluster, gene, avg_log2FC) %>%
+  arrange(cluster) %>%
+  print(n = 20)
+
+fibroblast_markers %>%
+    group_by(cluster) %>%
+    top_n(n = 3, wt = avg_log2FC) %>%
+    select(cluster, gene, avg_log2FC) %>%
+    arrange(cluster)
+
+```
+
+
+```{r fibroblast-dotplot}
+FB_markers <- c("Ptgis", "Prg4", "Cxcl5",
+                "Cdh4", "Aldh3a1", "Pla2g2e",
+                "Corin", "Edn3", "Sostdc1")
+
+DotPlot(dataset_fibroblast,
+        group.by = "seurat_clusters",
+        features = FB_markers) +
+  RotatedAxis() +
+  scale_colour_gradient2(midpoint = 0, 
+                         low = "blue", 
+                         mid = "grey", 
+                         high = "red")
+```
+
+```{r save-fibroblast}
+saveRDS(dataset_fibroblast, "dataset_fibroblast_post_Method4.rds")
+```
+
+
+## Phases specific gene list
+
+```{r download-gene-list}
+# Download file directly from JoVE
+download.file(
+  url = "https://www.jove.com/files/ftp_upload/67266/JoVE_PhaseSpecificGenes.txt",
+  destfile = "JoVE_PhaseSpecificGenes.txt"
+)
+
+# Load it
+PhaseSpecificGenes <- read_delim("JoVE_PhaseSpecificGenes.txt",
+                                  delim = "\t", col_names = TRUE)
+
+# Check what's inside
+head(PhaseSpecificGenes)
+```
+
+
+```{r add-module-scores}
+# Separate into three gene lists
+PS_Inflammatory_ms <- lapply(PhaseSpecificGenes[1], str_to_sentence)
+PS_Proliferative_ms <- lapply(PhaseSpecificGenes[2], str_to_sentence)
+PS_Resolution_ms <- lapply(PhaseSpecificGenes[3], str_to_sentence)
+
+# Add module scores to dataset
+dataset <- AddModuleScore(dataset,
+                          features = PS_Inflammatory_ms,
+                          ctrl = 100,
+                          name = "Inflammatory")
+
+dataset <- AddModuleScore(dataset,
+                          features = PS_Proliferative_ms,
+                          ctrl = 100,
+                          name = "Proliferative")
+
+dataset <- AddModuleScore(dataset,
+                          features = PS_Resolution_ms,
+                          ctrl = 100,
+                          name = "Resolution")
+```
+
+
+```{r module-score-plots}
+# First set DPW groups
+Idents(dataset) <- "time_space"
+dataset[["DPW"]] <- Idents(dataset)
+Idents(dataset) <- "DPW"
+
+new.cluster.ids <- c("D1","D1","D1","D1",
+                     "D3","D3","D3","D3",
+                     "D7","D7","D7","D7",
+                     "D14","D14","D14","D14","UW")
+names(new.cluster.ids) <- levels(dataset)
+dataset <- RenameIdents(dataset, new.cluster.ids)
+dataset[["DPW"]] <- Idents(dataset)
+
+# Visualize module scores by cell type
+DotPlot(dataset, group.by = "cell_types",
+        features = c("Inflammatory1",
+                     "Proliferative1",
+                     "Resolution1")) +
+  RotatedAxis() +
+  scale_colour_gradient2(midpoint = 0,
+                         low = "blue",
+                         mid = "grey",
+                         high = "red")
+```
+
+```{r module-score-dpw}
+DotPlot(dataset, group.by = "DPW",
+        features = c("Inflammatory1",
+                     "Proliferative1",
+                     "Resolution1")) +
+  RotatedAxis() +
+  scale_colour_gradient2(midpoint = 0,
+                         low = "blue",
+                         mid = "grey",
+                         high = "red")
+```
+
+```{r save-step5}
+saveRDS(dataset, "dataset_post_Method5.rds")
+```
+
+
+## Cell chat
+
+```{r check-dpw}
+# Check how many cells per DPW
+table(dataset$DPW)
+```
+
+
+## Step 7: Dataset Integration
+
+```{r download-batch3}
+# Download batch 3 files directly
+download.file(
+  url = "https://ftp.ncbi.nlm.nih.gov/geo/samples/GSM6190nnn/GSM6190915/suppl/GSM6190915_b3_barcodes.tsv.gz",
+  destfile = "GSM6190915_b3_barcodes.tsv.gz"
+)
+
+download.file(
+  url = "https://ftp.ncbi.nlm.nih.gov/geo/samples/GSM6190nnn/GSM6190915/suppl/GSM6190915_b3_features.tsv.gz",
+  destfile = "GSM6190915_b3_features.tsv.gz"
+)
+
+download.file(
+  url = "https://ftp.ncbi.nlm.nih.gov/geo/samples/GSM6190nnn/GSM6190915/suppl/GSM6190915_b3_matrix.mtx.gz",
+  destfile = "GSM6190915_b3_matrix.mtx.gz"
+)
+
+# Confirm files are there
+list.files(pattern = "b3")
+```
+
+
+```{r load-batch3}
+# Point to working directory for batch 3 files
+b3_data_dir <- getwd()
+
+# Load batch 3
+b3 <- Read10X_GEO(data_dir = b3_data_dir, gene.column = 2)
+
+# Check layers
+names(b3$GSM6190915_b3_)
+```
+
+```{r process-batch3}
+# Separate RNA and HTO
+dataset_rna_counts_b3 <- b3$GSM6190915_b3_$`Gene Expression`
+dataset_barcodes_b3   <- b3$GSM6190915_b3_$`Antibody Capture`
+
+# Create Seurat object
+dataset_b3 <- CreateSeuratObject(
+  counts = dataset_rna_counts_b3,
+  min.cells = 5,
+  min.features = 200
+)
+
+# Check dimensions
+dataset_b3
+```
+
+```{r demux-batch3}
+# Find joint barcodes
+dataset_rna_counts2_b3 <- LayerData(dataset_b3, data = "RNA")
+
+dataset_joint.barcodes_b3 <- intersect(
+  colnames(dataset_rna_counts2_b3),
+  colnames(dataset_barcodes_b3)
+)
+
+# Subset to joint barcodes
+dataset_rna_counts2_b3 <- dataset_rna_counts2_b3[, dataset_joint.barcodes_b3]
+dataset_barcodes2_b3   <- as.matrix(dataset_barcodes_b3[, dataset_joint.barcodes_b3])
+
+# Add HTO assay
+dataset_b3[["barcodes"]] <- CreateAssayObject(counts = dataset_barcodes2_b3)
+
+# Demultiplex
+dataset_b3 <- HTODemux(
+  dataset_b3,
+  assay = "barcodes",
+  positive.quantile = 0.99
+)
+
+# Remove negatives
+Idents(dataset_b3) <- "barcodes_classification.global"
+dataset_b3 <- subset(dataset_b3, idents = "Negative", invert = TRUE)
+
+# Check cells remaining
+ncol(dataset_b3)
+```
+
+
+```{r rename-qc-batch3}
+# Rename barcodes
+Idents(dataset_b3) <- "barcodes_maxID"
+dataset_b3 <- RenameIdents(dataset_b3,
+  "Barcode-1"  = "D01_2mm",
+  "Barcode-2"  = "D01_4mm",
+  "Barcode-3"  = "D01_6mm",
+  "Barcode-4"  = "D01_8mm",
+  "Barcode-5"  = "D03_2mm",
+  "Barcode-6"  = "D03_4mm",
+  "Barcode-7"  = "D03_6mm",
+  "Barcode-8"  = "D03_8mm",
+  "Barcode-9"  = "D07_2mm",
+  "Barcode-10" = "D07_4mm",
+  "Barcode-11" = "D07_6mm",
+  "Barcode-12" = "D07_8mm",
+  "Barcode-13" = "D14_2mm",
+  "Barcode-14" = "D14_4mm",
+  "Barcode-15" = "D14_6mm",
+  "Barcode-16" = "D14_8mm",
+  "Barcode-17" = "UW"
+)
+dataset_b3[["time_space"]] <- Idents(dataset_b3)
+
+# Mitochondrial QC
+DefaultAssay(dataset_b3) <- "RNA"
+dataset_b3[["percent.mt"]] <- PercentageFeatureSet(dataset_b3, pattern = "^mt-")
+dataset_b3 <- subset(dataset_b3, subset = nFeature_RNA > 200 & percent.mt < 25)
+
+# Doublet removal
+sce_b3 <- scDblFinder(
+  GetAssayData(dataset_b3, assay = "RNA", layer = "counts"),
+  samples = Idents(dataset_b3)
+)
+dataset_b3$scDblFinder.score <- sce_b3$scDblFinder.score
+dataset_b3 <- subset(dataset_b3, scDblFinder.score < 0.25)
+
+# Check final cell count
+ncol(dataset_b3)
+```
+
+```{r save-batch3}
+saveRDS(dataset_b3, "dataset_b3_post_Method2.rds")
+```
+
+
+```{r merge-batches}
+# Load batch 1
+dataset <- readRDS("dataset_post_Method2.rds")
+
+# Add batch labels
+dataset@meta.data$batch <- "b1"
+dataset_b3@meta.data$batch <- "b3"
+
+# Merge both datasets
+dataset_merged <- merge(
+  x = dataset,
+  y = dataset_b3,
+  add.cell.ids = c("b1", "b3"),
+  merge.data = TRUE
+)
+
+# Check merged dataset
+dataset_merged
+```
+
+```{r merged-pipeline}
+DefaultAssay(dataset_merged) <- "RNA"
+
+dataset_merged <- NormalizeData(dataset_merged)
+dataset_merged <- FindVariableFeatures(dataset_merged)
+dataset_merged <- ScaleData(dataset_merged)
+dataset_merged <- RunPCA(dataset_merged)
+
+# Check elbow plot
+ElbowPlot(dataset_merged, reduction = "pca", ndims = 50)
+
+png("elbow_merged.png", width = 800, height = 500)
+ElbowPlot(dataset_merged, reduction = "pca", ndims = 50)
+dev.off()
+```
+
+```{r merged-clustering}
+dataset_merged <- FindNeighbors(dataset_merged, dims = 1:10, reduction = "pca")
+dataset_merged <- FindClusters(dataset_merged, resolution = 0.1,
+                                cluster.name = "unintegrated_clusters")
+dataset_merged <- RunUMAP(dataset_merged, dims = 1:10, seed.use = 123,
+                           reduction = "pca",
+                           reduction.name = "umap.unintegrated")
+
+# Visualize by cluster and batch
+png("umap_unintegrated.png", width = 1200, height = 500)
+DimPlot(dataset_merged, reduction = "umap.unintegrated",
+        group.by = c("seurat_clusters", "batch"))
+dev.off()
+
+png("umap_unintegrated.png", width = 1200, height = 500)
+DimPlot(dataset_merged, reduction = "umap.unintegrated",
+        group.by = c("unintegrated_clusters", "batch"))
+```
+
+```{r rpca-integration}
+dataset_merged <- IntegrateLayers(
+  object = dataset_merged,
+  method = RPCAIntegration,
+  orig.reduction = "pca",
+  new.reduction = "integrated.rpca",
+  verbose = TRUE
+)
+
+# Cluster and UMAP after integration
+dataset_merged <- FindNeighbors(dataset_merged, dims = 1:10,
+                                 reduction = "integrated.rpca")
+dataset_merged <- FindClusters(dataset_merged, resolution = 0.1,
+                                cluster.name = "rpca_clusters")
+dataset_merged <- RunUMAP(dataset_merged, dims = 1:10, seed.use = 123,
+                           reduction = "integrated.rpca",
+                           reduction.name = "umap.rpca")
+
+# Visualize after integration
+png("umap_integrated.png", width = 1200, height = 500)
+DimPlot(dataset_merged, reduction = "umap.rpca",
+        group.by = c("rpca_clusters", "batch"))
+dev.off()
+```
+
+
+```{r join-layers}
+# Join layers after integration
+dataset_merged <- JoinLayers(dataset_merged)
+
+# Add time_space and DPW metadata
+Idents(dataset_merged) <- "time_space"
+dataset_merged[["DPW"]] <- Idents(dataset_merged)
+Idents(dataset_merged) <- "DPW"
+
+new.cluster.ids <- c("D1","D1","D1","D1",
+                     "D3","D3","D3","D3",
+                     "D7","D7","D7","D7",
+                     "D14","D14","D14","D14","UW")
+names(new.cluster.ids) <- levels(dataset_merged)
+dataset_merged <- RenameIdents(dataset_merged, new.cluster.ids)
+dataset_merged[["DPW"]] <- Idents(dataset_merged)
+
+# Check cell counts per DPW
+table(dataset_merged$DPW)
+```
+
+```{r check-timespace}
+# Check what time_space labels exist in merged dataset
+table(dataset_merged$time_space)
+```
+
+
+```{r fix-dpw}
+# Rename only the levels that actually exist
+Idents(dataset_merged) <- "time_space"
+
+dataset_merged <- RenameIdents(dataset_merged,
+  "D01_4mm" = "D1",
+  "D01_6mm" = "D1",
+  "D01_8mm" = "D1",
+  "D03_4mm" = "D3",
+  "D03_6mm" = "D3",
+  "D07_4mm" = "D7",
+  "D07_6mm" = "D7",
+  "D07_8mm" = "D7",
+  "D14_8mm" = "D14",
+  "UW"      = "UW"
+)
+
+dataset_merged[["DPW"]] <- Idents(dataset_merged)
+
+# Check again
+table(dataset_merged$DPW)
+```
+
+```{r save-merged}
+saveRDS(dataset_merged, "merged_dataset_post_Method7.rds")
+```
+
+
+```{r annotate-merged}
+# Run FindAllMarkers on merged dataset to annotate clusters
+Idents(dataset_merged) <- "rpca_clusters"
+
+# Visualize clusters first
+png("umap_merged_clusters.png", width = 800, height = 600)
+DimPlot(dataset_merged, reduction = "umap.rpca",
+        group.by = "rpca_clusters",
+        label = TRUE, raster = FALSE)
+dev.off()
+
+# Check markers
+merged_markers <- FindAllMarkers(dataset_merged,
+  max.cells.per.ident = 500,
+  only.pos = TRUE,
+  min.pct = 0.10,
+  logfc.threshold = 0.25)
+
+# Top 3 per cluster
+merged_markers %>%
+  group_by(cluster) %>%
+  top_n(n = 3, wt = avg_log2FC) %>%
+  select(cluster, gene, avg_log2FC) %>%
+  arrange(cluster)
+
+merged_markers %>%
+group_by(cluster) %>%
+top_n(n = 3, wt = avg_log2FC) %>%
+select(cluster, gene, avg_log2FC) %>%
+arrange(cluster)
+
+```
+
+
+```{r annotate-merged}
+Idents(dataset_merged) <- "rpca_clusters"
+
+dataset_merged <- RenameIdents(dataset_merged,
+  "0" = "Macrophage",
+  "1" = "Neutrophil",
+  "2" = "T cell",
+  "3" = "Fibroblast",
+  "4" = "Endothelial cell",
+  "5" = "Fibroblast",
+  "6" = "Epithelial cell",
+  "7" = "Fibroblast",
+  "8" = "Smooth muscle cell",
+  "9" = "Fibroblast"
+)
+
+dataset_merged[["cell_types"]] <- Idents(dataset_merged)
+
+# Visualize
+png("umap_merged_annotated.png", width = 800, height = 600)
+DimPlot(dataset_merged, reduction = "umap.rpca",
+        group.by = "cell_types",
+        label = FALSE, raster = FALSE)
+dev.off()
+
+# Save
+saveRDS(dataset_merged, "merged_dataset_post_Method7.rds")
+```
+
+## Step 6: CellChat
+```{r cellchat-subset}
+# Subset into D1 and D14
+Idents(dataset_merged) <- "DPW"
+dataset_D1  <- subset(dataset_merged, idents = "D1")
+dataset_D14 <- subset(dataset_merged, idents = "D14")
+
+# Check cell counts
+table(dataset_D1$cell_types)
+table(dataset_D14$cell_types)
+```
+
+## Step 6: CellChat
+```{r cellchat-setup}
+# Create CellChat objects for D1 and D14
+Idents(dataset_D1) <- "cell_types"
+Idents(dataset_D14) <- "cell_types"
+
+cellchat_D1 <- createCellChat(dataset_D1, 
+                               group.by = "ident", 
+                               assay = "RNA")
+cellchat_D14 <- createCellChat(dataset_D14, 
+                                group.by = "ident", 
+                                assay = "RNA")
+
+# Use mouse database
+CellChatDB.use <- CellChatDB.mouse
+cellchat_D1@DB <- CellChatDB.use
+cellchat_D14@DB <- CellChatDB.use
+
+# Subset to expressed genes
+cellchat_D1 <- subsetData(cellchat_D1)
+cellchat_D14 <- subsetData(cellchat_D14)
+```
+
+```{r cellchat-run}
+# Use parallel processing to speed things up
+future::plan("multisession", workers = 4)
+
+# Identify overexpressed genes and interactions
+cellchat_D1 <- identifyOverExpressedGenes(cellchat_D1, do.fast = F)
+cellchat_D1 <- identifyOverExpressedInteractions(cellchat_D1)
+
+cellchat_D14 <- identifyOverExpressedGenes(cellchat_D14, do.fast = F)
+cellchat_D14 <- identifyOverExpressedInteractions(cellchat_D14)
+
+# Compute communication probabilities
+cellchat_D1 <- computeCommunProb(cellchat_D1, 
+                                  type = "triMean", 
+                                  population.size = TRUE)
+cellchat_D14 <- computeCommunProb(cellchat_D14, 
+                                   type = "triMean", 
+                                   population.size = TRUE)
+
+# Filter out weak interactions
+cellchat_D1 <- filterCommunication(cellchat_D1, min.cells = 10)
+cellchat_D14 <- filterCommunication(cellchat_D14, min.cells = 10)
+
+# Compute pathway level communication
+cellchat_D1 <- computeCommunProbPathway(cellchat_D1)
+cellchat_D14 <- computeCommunProbPathway(cellchat_D14)
+
+# Aggregate networks
+cellchat_D1 <- aggregateNet(cellchat_D1)
+cellchat_D14 <- aggregateNet(cellchat_D14)
+```
+
+```{r cellchat-visualize}
+# Compute centrality
+cellchat_D1 <- netAnalysis_computeCentrality(cellchat_D1, slot.name = "netP")
+cellchat_D14 <- netAnalysis_computeCentrality(cellchat_D14, slot.name = "netP")
+
+# Visualize incoming vs outgoing interaction strengths
+png("cellchat_scatter_D1.png", width = 600, height = 500)
+netAnalysis_signalingRole_scatter(cellchat_D1)
+dev.off()
+
+png("cellchat_scatter_D14.png", width = 600, height = 500)
+netAnalysis_signalingRole_scatter(cellchat_D14)
+dev.off()
+
+# Check significant pathways
+cat("D1 pathways:\n")
+print(cellchat_D1@netP$pathways)
+
+cat("D14 pathways:\n")
+print(cellchat_D14@netP$pathways)
+```
+
+```{r cellchat-collagen}
+pathways.show <- c("COLLAGEN")
+
+# Circle plots
+png("collagen_circle_D1.png", width = 600, height = 600)
+netVisual_aggregate(cellchat_D1, signaling = pathways.show, layout = "circle")
+dev.off()
+
+png("collagen_circle_D14.png", width = 600, height = 600)
+netVisual_aggregate(cellchat_D14, signaling = pathways.show, layout = "circle")
+dev.off()
+
+# Save CellChat objects
+saveRDS(cellchat_D1, "cellchat_D1.rds")
+saveRDS(cellchat_D14, "cellchat_D14.rds")
+```
+
+
+```{r cellchat-comparison}
+# Merge D1 and D14 for comparison
+object.list <- list(D1 = cellchat_D1, D14 = cellchat_D14)
+cellchat_merged <- mergeCellChat(object.list, 
+                                  add.names = names(object.list))
+
+# Compare total interactions
+png("cellchat_compare.png", width = 800, height = 400)
+gg1 <- compareInteractions(cellchat_merged, show.legend = F)
+gg2 <- compareInteractions(cellchat_merged, show.legend = F, 
+                            measure = "weight")
+gg1 + gg2
+dev.off()
+
+# Save merged object
+saveRDS(cellchat_merged, "cellchat_merged.rds")
+```
